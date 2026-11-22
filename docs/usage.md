@@ -101,7 +101,7 @@ paint(mesh_path="shape.glb", image_path=["a.png", "b.png"], output_mesh_path="te
 
 - `Hunyuan3DUnposedMultiViewPipeline.__call__(images, *, fusion="velocity_mean", num_inference_steps=50, guidance_scale=5.0, generator=None, octree_resolution=384, num_chunks=8000, output_type="trimesh", enable_pbar=True)`。`images` 是一个路径（`str` 或 `Path`）或 PIL 图，或者 1～4 个它们组成的 list/tuple，表示同一个物体。返回只有一个元素的网格列表；`output_type="latent"` 返回形状为 `(1, L, C)` 的 latent。只给一张图时直接调用上游 `Hunyuan3DDiTFlowMatchingPipeline.__call__`。
 - 抠图不在几何管线里。没有透明背景的图要先抠图，和上游单图一样；`demo_multiview.py` 会自动做这一步。
-- `Hunyuan3DPaintPipeline.__call__` 的 `image_path` 现在也接受 1～4 个路径或 PIL 图组成的 list/tuple，末尾新增可选参数 `seed=0`。只传一个路径或一张 PIL 图、不传 `seed` 时和上游一样。
+- `Hunyuan3DPaintPipeline.__call__` 的 `image_path` 现在也接受 1～4 个路径（`str` 或 `Path`）或 PIL 图组成的 list/tuple，以及单个 `Path`，所以同一个列表可以直接传给几何和贴图两个管线。末尾新增可选参数 `seed=0`。只传一个 `str` 路径或一张 PIL 图、不传 `seed` 时和上游一样。
 - 两个管线各自限制最多 4 张，超过时抛 `ValueError`。
 
 ## 服务器验证命令
@@ -248,8 +248,12 @@ PY
 
 一组图片的顺序不带含义，管线按图片内容固定处理顺序，所以把同一组图倒过来传，几何结果应当逐位相同。
 
+每种融合方式跑两次，都和第 1 组的结果比：`repeat` 用原来的顺序再跑一次，是对照；`reversed` 把顺序倒过来。`repeat` 也不相同时，说明这台机器上同样的输入重跑本身就不逐位可重复，`reversed` 的结果就说明不了排序有没有起作用。
+
 ```bash
 for fusion in velocity_mean token_concat; do
+  python demo_multiview.py --images "${views[@]}" --seed 1234 \
+    --fusion "$fusion" --shape-only --output-dir "$RUN/$fusion-repeat"
   python demo_multiview.py --images "${views[3]}" "${views[2]}" "${views[1]}" "${views[0]}" --seed 1234 \
     --fusion "$fusion" --shape-only --output-dir "$RUN/$fusion-reversed"
 done
@@ -262,9 +266,10 @@ import trimesh
 r = Path(os.environ["RUN"])
 for fusion in ("velocity_mean", "token_concat"):
     a = trimesh.load(r / fusion / "shape.glb", force="mesh", process=False)
-    b = trimesh.load(r / f"{fusion}-reversed" / "shape.glb", force="mesh", process=False)
-    same = a.vertices.tobytes() == b.vertices.tobytes() and a.faces.tobytes() == b.faces.tobytes()
-    print(fusion, "reversed order identical" if same else "reversed order DIFFERENT")
+    for label in ("repeat", "reversed"):
+        b = trimesh.load(r / f"{fusion}-{label}" / "shape.glb", force="mesh", process=False)
+        same = a.vertices.tobytes() == b.vertices.tobytes() and a.faces.tobytes() == b.faces.tobytes()
+        print(fusion, label, "identical" if same else "DIFFERENT")
 PY
 ```
 

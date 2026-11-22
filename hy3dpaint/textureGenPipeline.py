@@ -81,7 +81,7 @@ def _load_reference_images(images):
         )
     loaded = []
     for index, image in enumerate(images):
-        if isinstance(image, str):
+        if isinstance(image, (str, os.PathLike)):
             # Copy so the file is read and closed now; the copy keeps the original mode (e.g. RGBA).
             with Image.open(image) as opened:
                 image = opened.copy()
@@ -122,6 +122,8 @@ class Hunyuan3DPaintPipeline:
             image_prompt = Image.open(image_path)
         elif isinstance(image_path, Image.Image):
             image_prompt = image_path
+        elif isinstance(image_path, os.PathLike):
+            image_prompt = _load_reference_images([image_path])
         elif isinstance(image_path, (list, tuple)):
             image_prompt = _load_reference_images(image_path)
         else:

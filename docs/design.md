@@ -51,7 +51,7 @@ pipeline(images, *, fusion="velocity_mean", num_inference_steps=50, guidance_sca
 
 改了两个上游文件，其余照旧：
 
-- `hy3dpaint/textureGenPipeline.py`：`Hunyuan3DPaintPipeline.__call__` 的 `image_path` 除了一个路径或一张 PIL 图，现在也接受 1～4 个路径或 PIL 图组成的 list/tuple（上游传列表会因 `image_prompt` 未赋值而报错）。路径在函数里读进来并关闭文件，保留原来的 mode。末尾新增 `seed=0`，传给 `multiviewDiffusionNet`。之后每张参考图照上游的做法缩放到 512、按透明通道铺白底、转 RGB。
+- `hy3dpaint/textureGenPipeline.py`：`Hunyuan3DPaintPipeline.__call__` 的 `image_path` 除了一个 `str` 路径或一张 PIL 图，现在也接受 1～4 个路径（`str` 或 `Path`）或 PIL 图组成的 list/tuple，以及单个 `Path`（上游传列表会因 `image_prompt` 未赋值而报错）。路径在函数里读进来并关闭文件，保留原来的 mode。末尾新增 `seed=0`，传给 `multiviewDiffusionNet`。之后每张参考图照上游的做法缩放到 512、按透明通道铺白底、转 RGB。
 - `hy3dpaint/utils/multiview_utils.py`：`multiviewDiffusionNet.__call__` 和 `forward_one` 末尾新增 `seed=0`，原来写死的 `seed_everything(0)` 和扩散的 `Generator(...).manual_seed(0)` 改用它。多张参考图时先按缩放后图片的像素字节排序，然后全部参考图都进参考分支（`self.pipeline(input_images, ...)`）和 DINOv2（`self.dino_v2(input_images)`）。一张时 DINOv2 仍按上游的写法 `self.dino_v2(input_images[0])` 调用。
 
 张量的几个轴要分清：`B = 1` 是一个物体；`N_ref` 是参考图的张数（1～4）；`N_gen` 是为烘焙选出的渲染视角数（`max_num_view`，默认最多 6 个），它和参考图张数无关。
