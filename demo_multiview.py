@@ -12,13 +12,14 @@ a reference (``textured.obj`` plus its maps), and packing into a PBR GLB (``mode
 from __future__ import annotations
 
 import argparse
+import contextlib
 import gc
 import os
 import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import Iterator, List, Optional, Sequence, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parent
 # Same package search path as demo.py, made absolute.
@@ -47,7 +48,7 @@ TEXTURE_OUTPUTS = (
 
 
 def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
-    from hy3dshape.multiview_pipeline import FUSION_MODES, MAX_IMAGES
+    from hy3dshape.multiview_pipeline import FUSION_MODES, MAX_IMAGES, normalize_image_set
 
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
@@ -63,7 +64,12 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--shape-only", action="store_true", help="Stop after the geometry stage (shape.glb).")
     args = parser.parse_args(argv)
 
-    # The image count is checked by Hunyuan3DUnposedMultiViewPipeline, and unreadable files by _load_images().
+    # Reuse the pipeline's own input check so that too many images fail here, before background removal and
+    # weight loading. Unreadable files are reported by _load_images().
+    try:
+        normalize_image_set(args.images)
+    except ValueError as exc:
+        parser.error(str(exc))
     if not 0 <= args.seed <= MAX_SEED:
         parser.error(f"--seed must be between 0 and {MAX_SEED}, got {args.seed}.")
     if not args.shape_only and not REALESRGAN_CKPT.is_file():
@@ -80,12 +86,11 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     return args
 
 
-def _has_partial_alpha(image: Image.Image) -> bool:
-    """True if the image has an alpha channel that is neither fully opaque nor fully transparent."""
+def _alpha_extrema(image: Image.Image) -> Optional[Tuple[int, int]]:
+    """``(min, max)`` of the alpha channel, or ``None`` if the image has no alpha channel."""
     if image.mode not in ("RGBA", "LA", "PA") and not (image.mode == "P" and "transparency" in image.info):
-        return False
-    low, high = image.convert("RGBA").getchannel("A").getextrema()
-    return low < 255 and high > 0
+        return None
+    return image.convert("RGBA").getchannel("A").getextrema()
 
 
 def _load_images(paths: List[str]) -> List[Image.Image]:
@@ -101,9 +106,17 @@ def _load_images(paths: List[str]) -> List[Image.Image]:
         except OSError as exc:
             raise ValueError(f"Could not read image {path}: {exc}") from exc
 
-        # Keep an existing cut-out. Look at the original mode first: demo.py converts to RGBA before checking for
-        # RGB, so it never removes the background.
-        if _has_partial_alpha(image):
+        # Look at the original mode first: demo.py converts to RGBA before checking for RGB, so it never removes the
+        # background.
+        alpha = _alpha_extrema(image)
+        if alpha is not None and alpha[1] == 0:
+            # Dropping the alpha channel here would hand the hidden RGB values to background removal as a photo.
+            raise ValueError(
+                f"Image {path} is fully transparent, so it shows no object. Pass an image whose alpha channel "
+                f"marks the object, or one without an alpha channel."
+            )
+        if alpha is not None and alpha[0] < 255:
+            # Keep an existing cut-out.
             image = image.convert("RGBA")
         else:
             if remover is None:
@@ -124,28 +137,47 @@ def _load_images(paths: List[str]) -> List[Image.Image]:
     return images
 
 
-def _report(stage: str, start: float) -> None:
+def _peak() -> str:
+    if not torch.cuda.is_available():
+        return "peak allocated n/a"
+    gib = torch.cuda.max_memory_allocated() / 2**30
+    return f"peak allocated {gib:.2f} GiB (PyTorch allocator peak, not whole-GPU usage)"
+
+
+@contextlib.contextmanager
+def _stage(name: str) -> Iterator[float]:
+    """Time one stage and track its allocator peak, both starting before the stage loads its models.
+
+    Yields the start time. A failure inside the stage (for example CUDA out of memory while loading) is reported
+    with the stage name and re-raised unchanged.
+    """
     if torch.cuda.is_available():
         torch.cuda.synchronize()
-        peak = f"{torch.cuda.max_memory_allocated() / 2**30:.2f} GiB (PyTorch allocator peak, not whole-GPU usage)"
-    else:
-        peak = "n/a"
-    print(f"[demo_multiview] {stage}: {time.perf_counter() - start:.1f} s, peak allocated {peak}", flush=True)
-
-
-def _reset_peak() -> float:
-    if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
-    return time.perf_counter()
+    start = time.perf_counter()
+    try:
+        yield start
+    except Exception:
+        # Only to name the failed stage; the error itself is re-raised. No synchronize() here: after a CUDA error
+        # it can raise again and hide the original failure.
+        print(f"[demo_multiview] {name} FAILED after {time.perf_counter() - start:.1f} s, {_peak()}", flush=True)
+        raise
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    print(
+        f"[demo_multiview] {name}, model loading + inference: {time.perf_counter() - start:.1f} s, {_peak()}",
+        flush=True,
+    )
 
 
 def _generate_shape(images: List[Image.Image], fusion: str, seed: int, shape_path: Path) -> None:
     from hy3dshape.multiview_pipeline import Hunyuan3DUnposedMultiViewPipeline
 
-    pipeline = Hunyuan3DUnposedMultiViewPipeline.from_pretrained(MODEL_PATH)
-    start = _reset_peak()
-    meshes = pipeline(images, fusion=fusion, generator=torch.manual_seed(seed))
-    _report(f"geometry ({len(images)} image(s), fusion={fusion if len(images) > 1 else 'single'})", start)
+    name = f"geometry ({len(images)} image(s), fusion={fusion if len(images) > 1 else 'single'})"
+    with _stage(name) as start:
+        pipeline = Hunyuan3DUnposedMultiViewPipeline.from_pretrained(MODEL_PATH)
+        print(f"[demo_multiview] geometry models loaded after {time.perf_counter() - start:.1f} s", flush=True)
+        meshes = pipeline(images, fusion=fusion, generator=torch.manual_seed(seed))
 
     mesh = meshes[0]
     if mesh is None or len(mesh.faces) == 0:
@@ -170,21 +202,20 @@ def _generate_texture(images: List[Image.Image], seed: int, output_dir: Path) ->
     apply_fix()
     from textureGenPipeline import Hunyuan3DPaintConfig, Hunyuan3DPaintPipeline
 
-    config = Hunyuan3DPaintConfig(max_num_view=6, resolution=512)
-    config.realesrgan_ckpt_path = str(REALESRGAN_CKPT)
-    config.multiview_cfg_path = str(REPO_ROOT / "hy3dpaint" / "cfgs" / "hunyuan-paint-pbr.yaml")
-    config.custom_pipeline = str(REPO_ROOT / "hy3dpaint" / "hunyuanpaintpbr")
-    pipeline = Hunyuan3DPaintPipeline(config)
-
-    start = _reset_peak()
-    obj_path = pipeline(
-        mesh_path=str(output_dir / "shape.glb"),
-        image_path=images,
-        output_mesh_path=str(output_dir / "textured.obj"),
-        save_glb=False,
-        seed=seed,
-    )
-    _report(f"texture ({len(images)} reference image(s))", start)
+    with _stage(f"texture ({len(images)} reference image(s))") as start:
+        config = Hunyuan3DPaintConfig(max_num_view=6, resolution=512)
+        config.realesrgan_ckpt_path = str(REALESRGAN_CKPT)
+        config.multiview_cfg_path = str(REPO_ROOT / "hy3dpaint" / "cfgs" / "hunyuan-paint-pbr.yaml")
+        config.custom_pipeline = str(REPO_ROOT / "hy3dpaint" / "hunyuanpaintpbr")
+        pipeline = Hunyuan3DPaintPipeline(config)
+        print(f"[demo_multiview] texture models loaded after {time.perf_counter() - start:.1f} s", flush=True)
+        obj_path = pipeline(
+            mesh_path=str(output_dir / "shape.glb"),
+            image_path=images,
+            output_mesh_path=str(output_dir / "textured.obj"),
+            save_glb=False,
+            seed=seed,
+        )
     print(f"[demo_multiview] wrote {obj_path}", flush=True)
     return Path(obj_path)
 
