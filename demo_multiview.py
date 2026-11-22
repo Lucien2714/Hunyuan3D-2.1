@@ -197,7 +197,10 @@ def _load_images(paths: List[str]) -> List[Image.Image]:
             # 16-bit grayscale without transparency, from a PNG or a TIFF. Pillow clips these pixels to 255 when it
             # converts them, which would hand background removal a nearly white picture. Keep the high byte, as
             # Pillow itself does for 16-bit RGB.
-            image = Image.fromarray((np.asarray(image) >> 8).astype(np.uint8))  # (H, W) uint8, mode L
+            reduced = Image.fromarray((np.asarray(image) >> 8).astype(np.uint8))  # (H, W) uint8, mode L
+            # Keep the metadata: background removal applies the EXIF orientation, as for every other photo.
+            reduced.info = dict(image.info)
+            image = reduced
         # Look at the original mode first: demo.py converts to RGBA before checking for RGB, so it never removes the
         # background.
         alpha = _alpha_extrema(image)
