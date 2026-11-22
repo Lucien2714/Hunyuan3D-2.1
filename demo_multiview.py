@@ -27,6 +27,7 @@ REPO_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO_ROOT / "hy3dshape"))
 sys.path.insert(0, str(REPO_ROOT / "hy3dpaint"))
 
+import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 from PIL import Image  # noqa: E402
@@ -121,39 +122,55 @@ def _png_colour_key(path: str) -> Optional[Tuple[int, int, Tuple[int, ...]]]:
             stream.seek(4, os.SEEK_CUR)  # CRC
 
 
-def _apply_png_colour_key(image: Image.Image, path: str) -> Image.Image:
-    """Return ``image`` with a colour key that matches the 8-bit pixels Pillow produced for it.
+def _colour_key_to_alpha(image: Image.Image, path: str) -> Image.Image:
+    """Turn the tRNS colour key of a PNG into an alpha channel; any other image is returned unchanged.
 
-    Pillow expands 1-, 2- and 4-bit gray pixels to 8 bits and keeps only the high byte of 16-bit RGB samples, but
-    leaves the colour key in the file's bit depth (seen with Pillow 10.4.0 and 12.3.0; only the 1-bit key is scaled
-    by 12.3.0). ``convert("RGBA")`` then misses the transparent pixels. Lossless PNG optimisers write such files
-    from ordinary cut-outs. The key is read from the file, so the result does not depend on how a Pillow version
-    stores it. 8-bit files are already read correctly and are returned unchanged.
+    A pixel is transparent exactly when all of its samples equal the key at the file's bit depth. Pillow's own
+    ``convert("RGBA")`` does not give that mask for every file (checked with Pillow 10.4.0, 11.3.0 and 12.3.0): 2-
+    and 4-bit gray pixels are expanded to 8 bits while the key is not scaled, the 1-bit key is scaled only by
+    12.3.0, 16-bit gray pixels are clipped to 255, and 16-bit RGB samples lose their low byte when the file is read.
+    Lossless PNG optimisers write all of these from ordinary RGBA cut-outs. So the key is read from the file and
+    compared with the full samples here, and only afterwards are 16-bit colours reduced to 8 bits.
+
+    Returns an RGBA image whose alpha is 0 or 255.
     """
     found = _png_colour_key(path)
     if found is None:
         return image
     bit_depth, colour_type, key = found
-    if colour_type == 0 and bit_depth < 8 and image.mode in ("1", "L"):
-        image = image.convert("L")
-        image.info["transparency"] = key[0] * 255 // (2**bit_depth - 1)  # same scaling as the pixels
-    elif colour_type == 0 and bit_depth == 16 and image.mode == "I;16":
-        # Pillow clips I;16 pixels to 255 when it converts them, which breaks the colours and the key comparison.
-        # Keep the high byte instead, as Pillow itself does for 16-bit RGB.
-        image = Image.fromarray((np.asarray(image) >> 8).astype(np.uint8))  # (H, W) uint8, mode L
-        image.info["transparency"] = key[0] >> 8
-    elif colour_type == 2 and bit_depth == 16 and image.mode == "RGB":
-        image.info["transparency"] = tuple(sample >> 8 for sample in key)
-    # For 16-bit files the comparison is on high bytes, the only part of the pixels that is left: a pixel that
-    # differs from the key only in its low byte becomes transparent too.
-    return image
+    if bit_depth < 8:
+        # Grayscale only. Pillow expands these pixels to 8 bits by the scaling below, which maps different samples
+        # to different values, so comparing after scaling the key the same way is still exact.
+        samples = np.asarray(image.convert("L"))  # (H, W) uint8; 1-bit files are read as mode 1
+        key = (key[0] * 255 // (2**bit_depth - 1),)
+    elif bit_depth == 16 and colour_type == 2:
+        # OpenCV keeps all 16 bits. It returns BGR, with an alpha channel appended when the file has a colour key.
+        # imdecode() on the file's bytes because imread() cannot open non-ASCII paths on Windows.
+        decoded = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+        if decoded is None:
+            raise ValueError(
+                f"Could not read image {path}: OpenCV failed to decode this 16-bit PNG, which is needed to apply "
+                f"its transparent colour. Save it again as an 8-bit PNG or as a PNG with an alpha channel."
+            )
+        samples = decoded[..., 2::-1]  # (H, W, 3) uint16, RGB
+    else:
+        # 8-bit files as Pillow read them, or 16-bit grayscale, which Pillow reads with its full samples (I;16).
+        samples = np.asarray(image)  # (H, W) or (H, W, 3)
+    height, width = samples.shape[:2]
+    opaque = (samples.reshape(height, width, -1) != key).any(axis=-1)  # (H, W) bool
+    if bit_depth == 16:
+        samples = (samples >> 8).astype(np.uint8)  # the high byte, as Pillow keeps for 16-bit RGB and RGBA
+    rgba = Image.fromarray(samples).convert("RGBA")
+    rgba.putalpha(Image.fromarray(opaque.astype(np.uint8) * 255))
+    return rgba
 
 
 def _alpha_extrema(image: Image.Image) -> Optional[Tuple[int, int]]:
     """``(min, max)`` of the image's alpha, or ``None`` if it carries no transparency information.
 
-    Transparency is either an alpha channel or a PNG transparency entry in ``image.info``: a palette index for mode
-    ``P``, a colour key for modes ``RGB`` and ``L``. ``convert("RGBA")`` turns all of them into an alpha channel.
+    Transparency is either an alpha channel or a transparency entry in ``image.info``, as Pillow keeps for palette
+    images; ``convert("RGBA")`` turns that entry into an alpha channel. PNG colour keys are not left to that
+    conversion: _colour_key_to_alpha() has already replaced them by an alpha channel.
     """
     if image.mode not in ("RGBA", "LA", "PA") and "transparency" not in image.info:
         return None
@@ -173,8 +190,9 @@ def _load_images(paths: List[str]) -> List[Image.Image]:
         except OSError as exc:
             raise ValueError(f"Could not read image {path}: {exc}") from exc
 
-        # The three-way split below and the RGBA image that is kept both use this corrected colour key.
-        image = _apply_png_colour_key(image, path)
+        # A PNG colour key becomes an alpha channel first, so the three-way split below and the RGBA image that is
+        # kept both use that one mask.
+        image = _colour_key_to_alpha(image, path)
         # Look at the original mode first: demo.py converts to RGBA before checking for RGB, so it never removes the
         # background.
         alpha = _alpha_extrema(image)
