@@ -193,6 +193,11 @@ def _load_images(paths: List[str]) -> List[Image.Image]:
         # A PNG colour key becomes an alpha channel first, so the three-way split below and the RGBA image that is
         # kept both use that one mask.
         image = _colour_key_to_alpha(image, path)
+        if image.mode in ("I;16", "I;16B"):
+            # 16-bit grayscale without transparency, from a PNG or a TIFF. Pillow clips these pixels to 255 when it
+            # converts them, which would hand background removal a nearly white picture. Keep the high byte, as
+            # Pillow itself does for 16-bit RGB.
+            image = Image.fromarray((np.asarray(image) >> 8).astype(np.uint8))  # (H, W) uint8, mode L
         # Look at the original mode first: demo.py converts to RGBA before checking for RGB, so it never removes the
         # background.
         alpha = _alpha_extrema(image)

@@ -58,6 +58,8 @@ python demo_multiview.py --images a.png b.png c.png --output-dir outputs/run1
    PNG 的透明色键（灰度 1、2、4、8、16 位，RGB 8、16 位）按文件原始的位深匹配：一个像素的各个样本和色键完全相等才算透明，匹配完再把 16 位的颜色取高 8 位转成 8 位。所以 16 位的图里和色键只差低 8 位的像素仍然是不透明的前景。上面三种情况的判断和保留下来的前景用的是这同一份遮罩。无损压缩工具会把普通的带透明通道的图存成带色键的文件，用 ZopfliPNG 的默认优化试过，上面七种都能得到。
 
    脚本自己匹配色键，是因为 Pillow 转出的透明通道对其中几种文件不对（在 Pillow 10.4.0、11.3.0 和 12.3.0 上查证）：2 位和 4 位灰度，三个版本都把像素展开成 8 位、色键却不换算；1 位灰度，10.4.0 和 11.3.0 不换算色键，12.3.0 换算；16 位灰度读进来样本是完整的，但转换时大于 255 的值都被截成 255；16 位 RGB 读进来时每个样本只留下高 8 位，色键仍是 16 位的值。8 位灰度和 8 位 RGB 的色键 Pillow 处理得对，脚本的结果和它一样。16 位 RGB 的完整样本用 OpenCV 读，它是 `requirements.txt` 里已有的依赖。
+
+   没有透明信息的 16 位灰度图（PNG 或 TIFF）也先取高 8 位转成 8 位再抠图，原因同上：交给 Pillow 转换的话，大于 255 的值（满量程是 65535）都会被截成 255，图几乎全白。
 2. 加载几何模型，用 `torch.manual_seed(seed)` 生成一个网格，写 `shape.glb`。网格为空时报错。之后释放几何模型和显存，再加载贴图模型。
 3. 贴图（`max_num_view=6`、`resolution=512`，和 `demo.py` 一样），全部输入图都作为参考图。上游的贴图管线会先把 `shape.glb` 重新网格化成 `white_mesh_remesh.obj`，然后写 `textured.obj`、`textured.mtl`、`textured.jpg`（albedo）、`textured_metallic.jpg`、`textured_roughness.jpg`。
 4. 用上游的 `create_glb_with_pbr_materials` 打包成 `model.glb`（base color 加 metallic-roughness 贴图），打包后检查每个图元都带这两张贴图，否则报错。打包用的临时文件在输出目录下的临时子目录里，结束后自动删除。
