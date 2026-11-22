@@ -11,7 +11,7 @@ Hunyuan3D 2.0 的多视图版本 Hunyuan3D-2mv 用的是固定的正、左、后
 - `docs/deploy-notes.md`：那台国内 GPU 服务器上的目录、下载源和踩过的坑。服务器本身的情况先看 cat3d 仓库里的 `docs/deploy-notes.md`，这里只记本项目特有的。
 - `docs/decisions/`：决策记录，说明某个做法当时为什么这样选。
 
-**`docs/usage.md`、`docs/design.md` 和 `docs/deploy-notes.md` 还没有建立。** 第一个需要它们的 PR 负责创建，之后按"文档"一节维护。
+`docs/usage.md` 和 `docs/design.md` 已经建立，按"文档"一节维护。**`docs/deploy-notes.md` 还没有建立**，第一次在服务器上实际部署时创建。
 
 ## 上游已有的多视图基础
 
@@ -22,11 +22,11 @@ Hunyuan3D 2.0 的多视图版本 Hunyuan3D-2mv 用的是固定的正、左、后
 - `hy3dshape/hy3dshape/pipelines.py` 里登记了 `Hunyuan3D-2mv` 对应的 2.0 VAE。
 - `gradio_app.py` 有前、后、左、右四个多视图输入框，拼成同样的字典。
 
-这些代码在 2.1 上从来没有跑通过，不能当作"已经能用"。
+这些代码在 2.1 上从来没有跑通过，不能当作"已经能用"。本 fork 当前的多视图实现不用它们，现状见 `docs/design.md`。
 
 另外，`hy3dshape/hy3dshape/pipelines.py` 的 `prepare_image()` 把传入的图片列表当作一批互不相干的图，每张图各出一个模型。本项目说的"一组图片"是同一个物体、只出一个模型，所以多视图输入不能直接复用这个列表入口。
 
-上游的贴图代码在结构上能接多张参考图，但实际只用了第一张：
+上游的贴图代码在结构上能接多张参考图，但实际只用了第一张（下面说的是上游的代码，本 fork 已改了 `multiview_utils.py` 和 `textureGenPipeline.py` 这两处，现状见 `docs/design.md`）：
 
 - `hy3dpaint/hunyuanpaintpbr/unet/modules.py` 的参考分支按参考图的张数（`N_ref`）处理，各张参考图的特征拼在一起交给参考注意力。
 - `hy3dpaint/utils/multiview_utils.py` 的 `multiviewDiffusionNet.forward_one()` 只把第一张图传给扩散管线和 DINOv2。
