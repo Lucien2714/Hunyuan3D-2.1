@@ -41,7 +41,9 @@ pipeline(images, *, fusion="velocity_mean", num_inference_steps=50, guidance_sca
 | CFG 关 | `v = mean_i(v_i)` | 只用 `C` 和一份 `x_t` |
 | 每步 DiT 前向 | CFG 开时 N+1 次，CFG 关时 N 次，都是 batch 1；`u` 由各图共用 | 1 次；CFG 开时 batch 2，关时 batch 1 |
 
-`velocity_mean` 用 float32 边算边累加，不同时保留 N 份预测，平均和引导做完后转回 latent 的 dtype 再交给 scheduler。`token_concat` 能用，是因为 `HunYuanDiTPlain` 的交叉注意力按实际的条件长度构造 K/V；官方配置关闭了固定长度的 `AttentionPool`（`use_attention_pooling: false`）和 decoupled CA。模型开着 `use_attention_pooling` 时，`token_concat` 抛 `RuntimeError`；条件编码器返回的不只是 `main` 一路（比如 `DualImageEncoder`）时，多图路径也抛 `RuntimeError`，提示改用官方 `hunyuan3d-dit-v2-1`。
+`velocity_mean` 用 float32 边算边累加，不同时保留 N 份预测，平均和引导做完后转回 latent 的 dtype 再交给 scheduler。`token_concat` 能用，是因为 `HunYuanDiTPlain` 的交叉注意力按实际的条件长度构造 K/V；官方配置关闭了固定长度的 `AttentionPool`（`use_attention_pooling: false`）和 decoupled CA。模型开着 `use_attention_pooling` 时，`token_concat` 抛 `RuntimeError`；条件编码器返回的不只是 `main` 一路（比如 `DualImageEncoder`）时，多图路径也抛 `RuntimeError`，提示改用官方 `hunyuan3d-dit-v2-1`。管线如果是用上游的固定视图组件（`MVImageProcessorV2` 或 `DinoImageEncoderMV`）加载的，不管给几张图，一开始就抛 `RuntimeError`，同样提示改用官方 `hunyuan3d-dit-v2-1`。
+
+读不出来或者预处理失败的图（路径不存在、文件损坏、前景为空）抛 `ValueError`，报出是第几张图和它的路径。只给一张图时，这个判断只在上游管线已经报错之后才做，正常的单图不会被多读一遍，模型和运行环境的错误原样抛出。
 
 **成本。** 按 DiT 处理的样本数算，`velocity_mean` 开 CFG 时约是单图（一次 batch 2 前向）的 `(N+1)/2` 倍，4 张约 2.5 倍；关 CFG 时是 N 倍。同一时刻只有一份 batch 1 前向的显存工作区、一份累加器和 N 份条件（FP16 每份约 2.7 MiB）。`token_concat` 每步只跑一次 DiT，但交叉注意力的 K/V 长度随 N 线性增长，4 张是 5480 个条件 token。实际耗时和显存要在服务器上量。
 
@@ -58,7 +60,7 @@ pipeline(images, *, fusion="velocity_mean", num_inference_steps=50, guidance_sca
 - DINOv2（`facebook/dinov2-giant`）：多张时输出 `(N_ref, L, D)`，重排成 `(1, N_ref·L, D)`，经 `ImageProjModel` 每个 token 投成 4 个 context token，再按 PBR 材质和生成视角复制。这里的 `L` 是贴图 DINOv2 的 token 数，不是几何的 1370。
 - `camera_azims`、`num_in_batch` 都是生成视角的参数，和参考图编号无关。
 
-上游发布的贴图训练代码每次只用一张参考图，官方贴图权重实际怎么训练的没有公开。多张参考图对官方权重来说是没有训练过的用法，效果要实测。
+上游发布的贴图训练代码每次只用一张参考图，没有联合多张参考图的训练。官方贴图权重是否做过这样的训练没有公开，多张参考图的效果没有验证过，要实测。
 
 ## 随机数
 

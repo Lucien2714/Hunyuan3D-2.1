@@ -40,7 +40,7 @@ python demo_multiview.py --images a.png b.png c.png --output-dir outputs/run1
 
 | 选项 | 默认值 | 说明 |
 |---|---|---|
-| `--images PATH [PATH ...]` | 必填 | 同一物体的 1～4 张图，顺序和拍摄方向都不用管。超过 4 张时几何管线报错。 |
+| `--images PATH [PATH ...]` | 必填 | 同一物体的 1～4 张图，顺序和拍摄方向都不用管。超过 4 张时在读图和加载模型之前就报错。 |
 | `--fusion {velocity_mean,token_concat}` | `velocity_mean` | 几何的多图融合方式，见 `docs/design.md`。只有一张图时不起作用。 |
 | `--seed INT` | `0` | 几何和贴图共用的种子，范围 0～2³²−1。 |
 | `--output-dir DIR` | 必填 | 本次运行的输出目录。目录可以已经存在，但里面不能有上一次运行留下的同名产物，否则开始前就报错并列出这些文件。 |
@@ -48,27 +48,44 @@ python demo_multiview.py --images a.png b.png c.png --output-dir outputs/run1
 
 运行顺序和输出（都在 `--output-dir` 下）：
 
-1. 逐张读图。已经有透明背景（透明通道既不是全透明也不是全不透明）的图原样保留；其余的用同一个 rembg 会话逐张抠图。抠完没有前景的图报错并给出文件名。
+1. 逐张读图，按透明通道分三种情况：
+   - 全透明的图直接报错并给出文件名，不会丢掉透明通道再去抠图。
+   - 已经有透明背景的图（透明通道里有不是完全不透明的像素）原样保留。
+   - 没有透明通道或者完全不透明的图，用同一个 rembg 会话逐张抠图。
+
+   处理完没有前景的图报错并给出文件名。
 2. 加载几何模型，用 `torch.manual_seed(seed)` 生成一个网格，写 `shape.glb`。网格为空时报错。之后释放几何模型和显存，再加载贴图模型。
 3. 贴图（`max_num_view=6`、`resolution=512`，和 `demo.py` 一样），全部输入图都作为参考图。上游的贴图管线会先把 `shape.glb` 重新网格化成 `white_mesh_remesh.obj`，然后写 `textured.obj`、`textured.mtl`、`textured.jpg`（albedo）、`textured_metallic.jpg`、`textured_roughness.jpg`。
 4. 用上游的 `create_glb_with_pbr_materials` 打包成 `model.glb`（base color 加 metallic-roughness 贴图），打包后检查每个图元都带这两张贴图，否则报错。打包用的临时文件在输出目录下的临时子目录里，结束后自动删除。
 
-每个阶段结束时打印耗时和 `torch.cuda.max_memory_allocated()`。这是 PyTorch 分配器的峰值，不等于整张卡的显存占用。上游说单图几何要 10 GB、贴图要 21 GB，多图的显存没有实测过。
+几何和贴图两个阶段都从加载模型之前开始计时，并在那时重置显存峰值。阶段结束时打印整个阶段（加载模型加推理）的耗时和 `torch.cuda.max_memory_allocated()`，中间另打印一行模型加载完成时已经用掉的时间。阶段中途失败（比如加载时显存不足）时，先打印失败的阶段名、已用时间和峰值，再照常报错。这里的峰值是 PyTorch 分配器的峰值，不等于整张卡的显存占用。上游说单图几何要 10 GB、贴图要 21 GB，多图的显存没有实测过。
 
 ## Python 接口
 
+在仓库根目录运行：
+
 ```python
+import gc
 import sys
 sys.path.insert(0, "./hy3dshape")
 sys.path.insert(0, "./hy3dpaint")
 
 import torch
 from hy3dshape.multiview_pipeline import Hunyuan3DUnposedMultiViewPipeline
-from textureGenPipeline import Hunyuan3DPaintConfig, Hunyuan3DPaintPipeline
 
 shape = Hunyuan3DUnposedMultiViewPipeline.from_pretrained("tencent/Hunyuan3D-2.1")
 mesh = shape(["a.png", "b.png"], fusion="velocity_mean", generator=torch.manual_seed(0))[0]
 mesh.export("shape.glb")
+
+# Free the geometry models before the texture models are loaded.
+del shape, mesh
+gc.collect()
+torch.cuda.empty_cache()
+
+# Must run before the texture pipeline imports its super-resolution dependencies (basicsr), as in demo.py.
+from torchvision_fix import apply_fix
+apply_fix()
+from textureGenPipeline import Hunyuan3DPaintConfig, Hunyuan3DPaintPipeline
 
 config = Hunyuan3DPaintConfig(max_num_view=6, resolution=512)
 config.realesrgan_ckpt_path = "hy3dpaint/ckpt/RealESRGAN_x4plus.pth"  # as in demo.py
