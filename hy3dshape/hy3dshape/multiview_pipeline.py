@@ -79,7 +79,7 @@ class Hunyuan3DUnposedMultiViewPipeline(Hunyuan3DDiTFlowMatchingPipeline):
     official ``hunyuan3d-dit-v2-1`` config and weights without any change to their format.
     """
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def __call__(
         self,
         images: ImageInput | Sequence[ImageInput],
