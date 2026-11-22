@@ -19,13 +19,16 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List, Literal, Optional, Sequence, Union
 
+import cv2
 import numpy as np
 import torch
 import trimesh
 from PIL import Image
 from tqdm import tqdm
 
+from .models.conditioner import DinoImageEncoderMV
 from .pipelines import Hunyuan3DDiTFlowMatchingPipeline, retrieve_timesteps
+from .preprocessors import MVImageProcessorV2
 from .utils import synchronize_timer
 
 ImageInput = Union[str, Path, Image.Image]
@@ -36,8 +39,13 @@ FUSION_MODES = ("velocity_mean", "token_concat")
 OUTPUT_TYPES = ("trimesh", "latent")
 
 
-def _normalize_images(images: ImageInput | Sequence[ImageInput]) -> List[Union[str, Image.Image]]:
-    """Turn the public ``images`` argument into a flat list of paths (``str``) and PIL images."""
+def normalize_image_set(images: ImageInput | Sequence[ImageInput]) -> List[Union[str, Image.Image]]:
+    """Validate the public ``images`` argument and return a flat list of paths (``str``) and PIL images.
+
+    Raises ``ValueError`` for an empty or oversized set, nested lists, view-name dicts and tensors. It reads no
+    image, so a caller that does expensive work before the pipeline runs (``demo_multiview.py``) can use it to
+    reject a bad set early.
+    """
     if isinstance(images, (str, Path, Image.Image)):
         items = [images]
     elif isinstance(images, (list, tuple)):
@@ -104,25 +112,43 @@ class Hunyuan3DUnposedMultiViewPipeline(Hunyuan3DDiTFlowMatchingPipeline):
             output_type: ``"trimesh"`` returns a list with one mesh (``None`` if surface extraction found nothing);
                 ``"latent"`` returns the final latent of shape ``(1, L, C)``.
         """
-        items = _normalize_images(images)
+        items = normalize_image_set(images)
         if fusion not in FUSION_MODES:
             raise ValueError(f"Unknown fusion {fusion!r}; choose one of {', '.join(FUSION_MODES)}.")
         if output_type not in OUTPUT_TYPES:
             raise ValueError(f"Unknown output_type {output_type!r}; choose one of {', '.join(OUTPUT_TYPES)}.")
 
+        # The fixed-view components kept from Hunyuan3D-2mv fail deep inside preprocessing or encoding (the
+        # processor calls .items() on a single image, the encoder wants a 5-D batch), for one image as well as for
+        # several. Name the cause up front; this reads no state.
+        main_encoder = getattr(self.conditioner, "main_image_encoder", None)
+        if isinstance(self.image_processor, MVImageProcessorV2) or isinstance(main_encoder, DinoImageEncoderMV):
+            raise RuntimeError(
+                "This pipeline was loaded with the fixed-view components of Hunyuan3D-2mv (MVImageProcessorV2 or "
+                "DinoImageEncoderMV), which take named front/left/back/right views. An unposed image set needs the "
+                "single-image config: load tencent/Hunyuan3D-2.1 with subfolder hunyuan3d-dit-v2-1."
+            )
+
         if len(items) == 1:
             # Hand over before touching any state (RNG, scheduler, latents) so that one image gives exactly the
             # upstream single-view result.
-            return super().__call__(
-                image=items[0],
-                num_inference_steps=num_inference_steps,
-                guidance_scale=guidance_scale,
-                generator=generator,
-                octree_resolution=octree_resolution,
-                num_chunks=num_chunks,
-                output_type=output_type,
-                enable_pbar=enable_pbar,
-            )
+            try:
+                return super().__call__(
+                    image=items[0],
+                    num_inference_steps=num_inference_steps,
+                    guidance_scale=guidance_scale,
+                    generator=generator,
+                    octree_resolution=octree_resolution,
+                    num_chunks=num_chunks,
+                    output_type=output_type,
+                    enable_pbar=enable_pbar,
+                )
+            except Exception:
+                # Reached only after a failure, so a good image is never read twice. If the image itself cannot be
+                # read or preprocessed, _prepare_one() reports which input is bad; otherwise the original model or
+                # runtime error propagates unchanged.
+                self._prepare_one(items[0], 0)
+                raise
 
         if fusion == "token_concat" and getattr(self.model, "use_attention_pooling", False):
             raise RuntimeError(
@@ -182,6 +208,20 @@ class Hunyuan3DUnposedMultiViewPipeline(Hunyuan3DDiTFlowMatchingPipeline):
             enable_pbar=enable_pbar,
         )
 
+    def _prepare_one(self, item: Union[str, Image.Image], index: int) -> dict:
+        """Preprocess one image with the upstream processor; a bad input is reported with its position or path."""
+        try:
+            # Never call prepare_image() on the whole list: it stacks the images as a batch of separate objects.
+            return self.prepare_image(item)
+        # prepare_image() only reads and preprocesses the image, no model runs in it. Upstream reports a bad image in
+        # several ways: FileNotFoundError for a missing path, AttributeError when cv2.imread() returns None for a
+        # file it cannot decode, OSError from PIL, cv2.error or ValueError for an unusable or empty foreground.
+        except (ValueError, AttributeError, OSError, cv2.error) as exc:
+            raise ValueError(
+                f"Could not read or preprocess {_describe(item, index)}: {exc!r}. Each image must be a readable "
+                f"image file or PIL image whose foreground (alpha channel) is not empty."
+            ) from exc
+
     def _encode_image_set(self, items: List[Union[str, Image.Image]]) -> List[torch.Tensor]:
         """Preprocess and encode each image on its own; returns N tensors of shape ``(1, L, C)``.
 
@@ -189,14 +229,7 @@ class Hunyuan3DUnposedMultiViewPipeline(Hunyuan3DDiTFlowMatchingPipeline):
         """
         prepared = []
         for index, item in enumerate(items):
-            # Never call prepare_image() on the whole list: it stacks the images as a batch of separate objects.
-            try:
-                cond_inputs = self.prepare_image(item)
-            except ValueError as exc:
-                raise ValueError(
-                    f"Could not preprocess {_describe(item, index)}: {exc}. Each image needs a visible foreground "
-                    f"(an alpha channel or a background that can be removed)."
-                ) from exc
+            cond_inputs = self._prepare_one(item, index)
             image = cond_inputs.pop("image")  # (1, 3, 512, 512), CPU float in [-1, 1]
             prepared.append((image.numpy().tobytes(), image, cond_inputs))
 
