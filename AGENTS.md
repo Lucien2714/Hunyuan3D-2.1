@@ -1,19 +1,21 @@
 # hunyuan3d-2.1-mv
 
-给 Hunyuan3D 2.1 的几何模型（Hunyuan3D-Shape-v2-1）加上多视图输入：输入同一物体的几张视图（正、左、后、右），输出 3D 模型。做法参照 Hunyuan3D 2.0 的多视图版本 Hunyuan3D-2mv。要做的包括多视图的条件编码、训练或微调、推理管线，以及让 `gradio_app.py`、`api_server.py` 能用上多视图模型。生成的模型会被 cat3d 的 `hunyuan3d_server` 使用，cat3d 是另一个仓库。
+给 Hunyuan3D 2.1 加上多视图输入：输入同一物体的几张图片，视角不固定，也不用标注每张图是从哪个方向拍的，输出带贴图的 3D 模型，目的是让结果和每一张输入图都对得上。几何模型（Hunyuan3D-Shape-v2-1）和贴图模型（Hunyuan3D-Paint-v2-1）都要支持。要做的包括不用训练的多图融合基线、多视图的条件编码、训练或微调、几何的推理管线、贴图管线的多参考图输入，以及让 `gradio_app.py`、`api_server.py` 能用上多视图。生成的模型会被 cat3d 的 `hunyuan3d_server` 使用，cat3d 是另一个仓库。
+
+Hunyuan3D 2.0 的多视图版本 Hunyuan3D-2mv 用的是固定的正、左、后、右四个视图。本项目不沿用这一点，原因见 `docs/decisions/0001-unposed-image-set-input.md`。
 
 本仓库 fork 自 [Tencent-Hunyuan/Hunyuan3D-2.1](https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1)。`README.md` 是上游的英文说明，不要改它，免得和上游合并时冲突。本项目自己的文档放在 `docs/` 下，动手前按要改的部分读对应文档：
 
 - `docs/usage.md`：多视图模型怎么装、怎么推理、怎么训练，配置项，验证状态。
-- `docs/design.md`：多视图条件怎么进模型、视图约定、权重和配置的格式、和上游单视图的差别。
+- `docs/design.md`：多视图条件怎么进模型、多视图输入的约定、权重和配置的格式、和上游单视图的差别。
 - `docs/deploy-notes.md`：那台国内 GPU 服务器上的目录、下载源和踩过的坑。服务器本身的情况先看 cat3d 仓库里的 `docs/deploy-notes.md`，这里只记本项目特有的。
 - `docs/decisions/`：决策记录，说明某个做法当时为什么这样选。
 
-**这些文档还没有建立。** 第一个需要它们的 PR 负责创建，之后按"文档"一节维护。
+**`docs/usage.md`、`docs/design.md` 和 `docs/deploy-notes.md` 还没有建立。** 第一个需要它们的 PR 负责创建，之后按"文档"一节维护。
 
 ## 上游已有的多视图基础
 
-上游代码里留着 2.0 多视图版本的一部分，2.1 的官方权重没有用到它们。动手前先读：
+上游的几何代码里留着 2.0 多视图版本的一部分，2.1 的官方权重没有用到它们。它们是按固定四视图写的，和本项目的约定不同（见"多视图约定"），只能参考，不能当作本项目的约定。动手前先读：
 
 - `hy3dshape/hy3dshape/models/conditioner.py` 的 `DinoImageEncoderMV`：每张视图分别过 DINOv2，加一个按视图编号的正弦位置编码（`view_embed`），再把各视图的 token 拼成一串。`unconditional_embedding()` 按视图数给出全零条件。
 - `hy3dshape/hy3dshape/preprocessors.py` 的 `MVImageProcessorV2`：输入 `{视图名: 图片}` 的字典，按 `front=0, left=1, back=2, right=3` 排序，返回 `view_idxs`。注释写的是"正面、正面顺时针转 90°、背面、正面顺时针转 270°"。
@@ -21,6 +23,13 @@
 - `gradio_app.py` 有前、后、左、右四个多视图输入框，拼成同样的字典。
 
 这些代码在 2.1 上从来没有跑通过，不能当作"已经能用"。
+
+上游的贴图代码在结构上能接多张参考图，但实际只用了第一张：
+
+- `hy3dpaint/hunyuanpaintpbr/unet/modules.py` 的参考分支按参考图的张数（`N_ref`）处理，各张参考图的特征拼在一起交给参考注意力。
+- `hy3dpaint/utils/multiview_utils.py` 的 `multiviewDiffusionNet.forward_one()` 只把第一张图传给扩散管线和 DINOv2。
+- `hy3dpaint/textureGenPipeline.py` 的 `Hunyuan3DPaintPipeline.__call__()` 在传入图片列表时会报错，因为 `image_prompt` 没有赋值。
+- 上游发布的贴图训练代码每次只用一张参考图（`hy3dpaint/hunyuanpaintpbr/unet/model.py` 的 `prepare_batch_data()`），所以多张参考图是官方贴图权重没有训练过的用法。
 
 ## 命令
 
@@ -55,11 +64,14 @@ uv run --no-project --python 3.10 python -m py_compile <改到的 .py 文件>
   - `hy3dshape/hy3dshape/models/diffusion/flow_matching_sit.py`：训练用的 Lightning 模块 `Diffuser`，负责编码条件、无条件分支和损失。
   - `hy3dshape/hy3dshape/models/autoencoders/`：形状 VAE（`ShapeVAE`），本项目不训练它。
   - `hy3dshape/hy3dshape/pipelines.py`：推理管线 `Hunyuan3DDiTFlowMatchingPipeline`，权重加载 `from_pretrained()`。
-  - `hy3dshape/hy3dshape/preprocessors.py`：输入图的抠图、居中、缩放，以及多视图的排序。
+  - `hy3dshape/hy3dshape/preprocessors.py`：输入图的居中、缩放，以及上游按固定视图排序的 `MVImageProcessorV2`。抠图在 `hy3dshape/hy3dshape/rembg.py`。
   - `hy3dshape/hy3dshape/data/dit_asl.py`：训练数据加载。数据格式见 `hy3dshape/tools/README.md`，`hy3dshape/tools/mini_trainset/` 是随仓库带的几条样例数据。
   - `hy3dshape/main.py`、`hy3dshape/configs/`、`hy3dshape/scripts/train_deepspeed.sh`：训练入口、配置和多卡启动脚本。
   - `hy3dshape/tools/evaluation/`：倒角距离、水密检查。
-- `hy3dpaint/`：PBR 贴图模型。贴图本来就是多视图生成的，和本项目的"多视图输入"不是一回事。除非方案里写明，不改这里。
+- `hy3dpaint/`：PBR 贴图模型。它内部本来就先生成多个视角的图再烘焙成贴图，那是它的输出方式，和本项目的"多视图输入"不是一回事。本项目在这里要做的是让多张输入图都作为参考图。和参考图输入无关的部分，除非方案里写明，不改。
+  - `hy3dpaint/textureGenPipeline.py`：贴图管线 `Hunyuan3DPaintPipeline`，负责选视角、调用多视角扩散、超分和烘焙。
+  - `hy3dpaint/utils/multiview_utils.py`：`multiviewDiffusionNet`，把参考图、法线图和位置图交给扩散管线。
+  - `hy3dpaint/hunyuanpaintpbr/`：扩散管线和 UNet。参考图经参考分支和 DINOv2 特征进入模型。
 - 根目录的 `gradio_app.py`、`api_server.py`、`api_models.py`、`model_worker.py`、`demo.py`：演示和 HTTP 服务，都调用上面两个管线。
 
 ## 约定
@@ -69,15 +81,17 @@ uv run --no-project --python 3.10 python -m py_compile <改到的 .py 文件>
 - `origin` 是本 fork，`upstream` 是腾讯的官方仓库，`upstream` 只用来拉取，推送地址已禁用。`gh` 的默认仓库已设为 `Lucien2714/Hunyuan3D-2.1`。在 fork 里执行 `gh pr create` 时，gh 可能默认把 PR 开到上游，所以 `gh` 命令一律带 `--repo Lucien2714/Hunyuan3D-2.1`，**绝不往上游开 PR、发评论或推送**。
 - 同步上游用 `chore/sync-upstream` 分支：`git fetch upstream`，把 `upstream/main` 合并进来（merge，不 rebase），开 PR。
 - 尽量不改上游文件。能加新文件、新类、新配置的，就不改原来的。不得不改上游文件时，改动越小越好，不顺手重排、重命名或格式化周围的代码。
-- 上游的单视图行为保持不变：不传多视图时，`Hunyuan3DDiTFlowMatchingPipeline`、`gradio_app.py`、`api_server.py` 用官方 2.1 权重的结果要和改之前一样。
+- 上游的单视图行为保持不变：只给一张图时，`Hunyuan3DDiTFlowMatchingPipeline`、`Hunyuan3DPaintPipeline`、`gradio_app.py`、`api_server.py` 用官方 2.1 权重的结果要和改之前一样。
 - 上游文件开头的许可声明照留，新文件不用加。许可的说法见 cat3d 仓库 `docs/backends.md` 的"许可"一节，商用前要自己确认。
 
 **多视图约定**
 
-- 视图的名字和编号是一套约定，当前沿用 `MVImageProcessorV2` 的 `front=0, left=1, back=2, right=3`。它决定了 `view_embed` 取哪一行，训练数据、预处理、模型、推理管线、`gradio_app.py`、`api_server.py` 和 cat3d 的调用方必须一致。要改的话，写决策记录，并同时改上面所有地方。
-- 每个视图对应的相机（方位角、俯仰角、正交还是透视、物体在画面里多大）写在 `docs/design.md`，训练数据的渲染和推理时的输入都按它。
-- 允许缺视图（比如只给正面和背面）。缺视图时条件 token 怎么排、无条件分支怎么给，在 `design.md` 里写清楚。
-- 输出模型的坐标系照上游 2.1：多视图版本不另加旋转。cat3d 那边对朝向的约定是 glTF 坐标系（Y 轴朝上，正面朝 +Z），如果多视图版本的朝向和单视图不同，要在文档里写明。
+- 多视图输入是同一物体的一组图片，1 到 N 张。图片没有视图名，也没有方位编号，顺序不带含义，调用方不需要知道每张图是从哪个角度拍的。N 的上限写在 `docs/design.md`。这样选的原因见 `docs/decisions/0001-unposed-image-set-input.md`。
+- 不沿用 `MVImageProcessorV2` 的 `front=0, left=1, back=2, right=3`。模型里如果要区分图片，编号只表示"第几张"，不表示方位。
+- 这套约定在训练数据、预处理、模型、几何和贴图的推理管线、`gradio_app.py`、`api_server.py` 和 cat3d 的调用方之间必须一致。要改的话，写决策记录，并同时改上面所有地方。
+- 每张图各自抠图、居中、缩放，做法照上游单视图的预处理。对输入图的要求（背景、物体在画面里多大）写在 `docs/design.md`。
+- 图片张数可以变。张数不同时条件 token 怎么排、无条件分支怎么给，在 `design.md` 里写清楚。只给一张图时，用官方 2.1 权重的结果要和上游单视图一样，见"和上游的关系"。
+- 输出模型的坐标系照上游 2.1：多视图版本不另加旋转，也不按某一张输入图的拍摄方向去转模型。cat3d 那边对朝向的约定是 glTF 坐标系（Y 轴朝上，正面朝 +Z），如果多视图版本的朝向和单视图不同，要在文档里写明。
 
 **权重、配置和数据**
 
@@ -89,10 +103,11 @@ uv run --no-project --python 3.10 python -m py_compile <改到的 .py 文件>
 **加或改一项多视图能力时要同步的地方**
 
 1. 模型：`conditioner.py` 的编码器，`build_image_encoder()` 里的登记。
-2. 训练：`dit_asl.py` 能读出多视图和 `view_idxs`，`Diffuser` 把它们传给编码器，`hy3dshape/configs/` 里有对应的配置。
-3. 推理：`pipelines.py` 接受多视图输入，`preprocessors.py` 处理，无条件分支的长度和有条件的一致。
-4. 演示和服务：`gradio_app.py`、`api_server.py` 和 `api_models.py`（HTTP 接口的字段），`API_DOCUMENTATION.md`。
-5. 文档：`usage.md`、`design.md`，以及 cat3d 那边要跟着改什么（写在 PR 描述里，cat3d 的改动在那个仓库里另开 PR）。
+2. 训练：`dit_asl.py` 能读出同一物体的多张图，`Diffuser` 把它们传给编码器，`hy3dshape/configs/` 里有对应的配置。
+3. 几何推理：推理管线接受一组图片，每张图各自预处理，无条件分支的长度和有条件的一致。
+4. 贴图推理：`textureGenPipeline.py` 和 `multiview_utils.py` 把同一组图片都作为参考图。
+5. 演示和服务：`gradio_app.py`、`api_server.py` 和 `api_models.py`（HTTP 接口的字段），`API_DOCUMENTATION.md`。
+6. 文档：`usage.md`、`design.md`，以及 cat3d 那边要跟着改什么（写在 PR 描述里，cat3d 的改动在那个仓库里另开 PR）。
 
 ## 代码规范
 
@@ -140,7 +155,7 @@ uv run --no-project --python 3.10 python -m py_compile <改到的 .py 文件>
   - 改了训练的，用 `hy3dshape/tools/mini_trainset/` 跑几步确认能训练起来。注意 `hy3dshape/main.py` 的 `merge_cfg()` 会让配置文件里的 `training` 字段盖掉同名的命令行参数，所以 `--steps` 这类参数要改在配置里；`train_demo.sh` 写死了 8 张卡并带 `--deepspeed`；mini 过拟合配置的注释说它要 68G 显存。命令要对照服务器的卡数和显存写。
   - 只改演示和 HTTP 服务的，上游带的 `test_api_server.py` 可以作为验证命令的一部分。
 - 训练结果要写明：用的数据（多少条、怎么渲染的）、步数、显卡、评估方法（`hy3dshape/tools/evaluation/` 的倒角距离等）和数字。只看过几张渲染图的，就写"只看过几张渲染图"。
-- 开发机是 6 GB 显存的 Windows 机器。上游说几何生成要 10 GB 显存，所以 2.1 的推理和任何训练在本机都跑不了，不要声称验证过。
+- 开发机是 6 GB 显存的 Windows 机器。上游说几何生成要 10 GB 显存、贴图生成要 21 GB，所以 2.1 的推理和任何训练在本机都跑不了，不要声称验证过。
 - 真实权重上的推理和训练只能在那台 GPU 服务器上做，由用户去跑。
 
 ## 开发流程
@@ -178,9 +193,9 @@ uv run --no-project --python 3.10 python -m py_compile <改到的 .py 文件>
 - 架构层面的改动要让用户知道：PR 描述里写明改了下面哪一项，合并后调度者在给用户的汇报里说明。改变了下面任意一项的 PR 算架构层面的改动：
   - 模型结构，即条件编码、去噪网络或它们之间怎么连，会让已有权重加载不了或结果变化的；
   - 权重和配置的格式，即目录布局、`config.yaml` 的字段、state dict 的键名；
-  - 多视图约定，即视图名、编号、相机，以及缺视图时的处理；
+  - 多视图约定，即一组输入图片的含义（张数、顺序、带不带方位信息），以及张数变化时的处理；
   - 训练数据的格式；
-  - 推理管线的公开接口（`Hunyuan3DDiTFlowMatchingPipeline.__call__` 和 `from_pretrained()` 的参数）或 `api_server.py` 的 HTTP 接口。
+  - 推理管线的公开接口（`Hunyuan3DDiTFlowMatchingPipeline.__call__` 和 `from_pretrained()` 的参数、`Hunyuan3DPaintPipeline.__call__` 的参数、本项目新加的多视图管线的参数）或 `api_server.py` 的 HTTP 接口。
 - 这里说的是改变了含义。只是碰到这些文件，比如调整格式、改注释、重排 import，不算。
 - 拿不准算不算时，按架构层面的改动处理。
 
