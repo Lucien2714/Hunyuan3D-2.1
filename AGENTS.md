@@ -24,12 +24,14 @@ Hunyuan3D 2.0 的多视图版本 Hunyuan3D-2mv 用的是固定的正、左、后
 
 这些代码在 2.1 上从来没有跑通过，不能当作"已经能用"。
 
+另外，`hy3dshape/hy3dshape/pipelines.py` 的 `prepare_image()` 把传入的图片列表当作一批互不相干的图，每张图各出一个模型。本项目说的"一组图片"是同一个物体、只出一个模型，所以多视图输入不能直接复用这个列表入口。
+
 上游的贴图代码在结构上能接多张参考图，但实际只用了第一张：
 
 - `hy3dpaint/hunyuanpaintpbr/unet/modules.py` 的参考分支按参考图的张数（`N_ref`）处理，各张参考图的特征拼在一起交给参考注意力。
 - `hy3dpaint/utils/multiview_utils.py` 的 `multiviewDiffusionNet.forward_one()` 只把第一张图传给扩散管线和 DINOv2。
 - `hy3dpaint/textureGenPipeline.py` 的 `Hunyuan3DPaintPipeline.__call__()` 在传入图片列表时会报错，因为 `image_prompt` 没有赋值。
-- 上游发布的贴图训练代码每次只用一张参考图（`hy3dpaint/hunyuanpaintpbr/unet/model.py` 的 `prepare_batch_data()`），所以多张参考图是官方贴图权重没有训练过的用法。
+- 上游发布的贴图训练代码每次只用一张参考图（`hy3dpaint/hunyuanpaintpbr/unet/model.py` 的 `prepare_batch_data()`）。官方贴图权重实际是怎么训练的没有公开；按这份代码，多张参考图是没有训练过的用法。
 
 ## 命令
 
@@ -97,7 +99,7 @@ uv run --no-project --python 3.10 python -m py_compile <改到的 .py 文件>
 
 - 本项目训练出的权重沿用上游的目录布局：`<模型目录>/<子目录>/config.yaml` 加 `model.fp16.ckpt`（或 `.safetensors`），这样 `from_pretrained()` 和 `--model_path`/`--subfolder` 不用改就能加载。多视图模型的子目录名定好后写进 `usage.md`。
 - 权重优先从 ModelScope 下载，放到官方代码查找的本地位置（`$HY3DGEN_MODELS`，默认 `~/.cache/hy3dgen`），不改官方的查找逻辑。只在 Hugging Face 上有的权重要在文档里写明，国内服务器上 Hugging Face 的大文件基本下不来。
-- 训练配置放在 `hy3dshape/configs/`，新文件名照现有的写法，写明编码器、视图数和学习率。
+- 训练配置放在 `hy3dshape/configs/`，新文件名照现有的写法，写明编码器、图片张数上限和学习率。
 - 权重、训练输出（`hy3dshape/output_folder/`）、数据集、`hy3dpaint/ckpt/`、`.env` 都不进 git。随仓库的样例数据只有上游那几条，不再加大文件。
 
 **加或改一项多视图能力时要同步的地方**
@@ -125,7 +127,7 @@ uv run --no-project --python 3.10 python -m py_compile <改到的 .py 文件>
 
 **报错**
 
-- 输入有问题（视图名不认识、视图数超过模型支持的、图片尺寸不对）时抛 `ValueError`，模型或运行环境出错时抛 `RuntimeError`。不要用 `assert` 检查用户输入，`python -O` 时它不生效。
+- 输入有问题（图片张数超过模型支持的、图片尺寸不对）时抛 `ValueError`，模型或运行环境出错时抛 `RuntimeError`。不要用 `assert` 检查用户输入，`python -O` 时它不生效。
 - 报错信息要让用户知道下一步做什么：哪里出了问题，该检查哪个配置、哪个参数、哪份权重。
 - 把一种异常转成另一种时用 `raise ... from exc`，保留原因。
 - 不静默吞掉异常。不得不捕获 `Exception` 或忽略某个错误时，在旁边写注释说明原因。
