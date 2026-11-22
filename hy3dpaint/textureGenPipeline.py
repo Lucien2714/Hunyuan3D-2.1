@@ -68,6 +68,31 @@ class Hunyuan3DPaintConfig:
             self.candidate_view_weights.append(0.01)
 
 
+# Reference images of one object accepted by Hunyuan3DPaintPipeline; see docs/design.md.
+MAX_REFERENCE_IMAGES = 4
+
+
+def _load_reference_images(images):
+    """Load a flat list/tuple of image paths or PIL images that all show the same object."""
+    if not 1 <= len(images) <= MAX_REFERENCE_IMAGES:
+        raise ValueError(
+            f"Expected 1 to {MAX_REFERENCE_IMAGES} reference images of one object, got {len(images)}. "
+            f"Pass between 1 and {MAX_REFERENCE_IMAGES} images."
+        )
+    loaded = []
+    for index, image in enumerate(images):
+        if isinstance(image, str):
+            # Copy so the file is read and closed now; the copy keeps the original mode (e.g. RGBA).
+            with Image.open(image) as opened:
+                image = opened.copy()
+        elif not isinstance(image, Image.Image):
+            raise ValueError(
+                f"Reference image #{index + 1} has type {type(image).__name__}; each one must be a path or a PIL image."
+            )
+        loaded.append(image)
+    return loaded
+
+
 class Hunyuan3DPaintPipeline:
 
     def __init__(self, config=None) -> None:
@@ -90,17 +115,22 @@ class Hunyuan3DPaintPipeline:
         print("Models Loaded.")
 
     @torch.no_grad()
-    def __call__(self, mesh_path=None, image_path=None, output_mesh_path=None, use_remesh=True, save_glb=True):
+    def __call__(self, mesh_path=None, image_path=None, output_mesh_path=None, use_remesh=True, save_glb=True, seed=0):
         """Generate texture for 3D mesh using multiview diffusion"""
         # Ensure image_prompt is a list
         if isinstance(image_path, str):
             image_prompt = Image.open(image_path)
         elif isinstance(image_path, Image.Image):
             image_prompt = image_path
+        elif isinstance(image_path, (list, tuple)):
+            image_prompt = _load_reference_images(image_path)
+        else:
+            raise ValueError(
+                f"`image_path` must be an image path, a PIL image, or a list/tuple of 1 to {MAX_REFERENCE_IMAGES} "
+                f"of them showing the same object, got {type(image_path).__name__}."
+            )
         if not isinstance(image_prompt, List):
             image_prompt = [image_prompt]
-        else:
-            image_prompt = image_path
 
         # Process mesh
         path = os.path.dirname(mesh_path)
@@ -151,6 +181,7 @@ class Hunyuan3DPaintPipeline:
             prompt=image_caption,
             custom_view_size=self.config.resolution,
             resize_input=True,
+            seed=seed,
         )
         ###########  Enhance  ##########
         enhance_images = {}
