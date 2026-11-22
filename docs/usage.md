@@ -54,6 +54,8 @@ python demo_multiview.py --images a.png b.png c.png --output-dir outputs/run1
    - 没有透明信息或者完全不透明的图，用同一个 rembg 会话逐张抠图。
 
    处理完没有前景的图报错并给出文件名。
+
+   已知限制：位深低于 8 位的灰度 PNG 如果用透明色键表示背景，Pillow 把像素展开成 8 位后色键对不上（在 Pillow 10.4.0 和 12.3.0 上复现过）。这种图会被当成完全不透明的图去抠图，全透明时也不会按第一种情况报错。照片和常见的抠图结果不是这种格式，所以没有专门处理。
 2. 加载几何模型，用 `torch.manual_seed(seed)` 生成一个网格，写 `shape.glb`。网格为空时报错。之后释放几何模型和显存，再加载贴图模型。
 3. 贴图（`max_num_view=6`、`resolution=512`，和 `demo.py` 一样），全部输入图都作为参考图。上游的贴图管线会先把 `shape.glb` 重新网格化成 `white_mesh_remesh.obj`，然后写 `textured.obj`、`textured.mtl`、`textured.jpg`（albedo）、`textured_metallic.jpg`、`textured_roughness.jpg`。
 4. 用上游的 `create_glb_with_pbr_materials` 打包成 `model.glb`（base color 加 metallic-roughness 贴图），打包后检查每个图元都带这两张贴图，否则报错。打包用的临时文件在输出目录下的临时子目录里，结束后自动删除。
