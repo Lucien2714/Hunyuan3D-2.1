@@ -55,7 +55,7 @@ python demo_multiview.py --images a.png b.png c.png --output-dir outputs/run1
 
    处理完没有前景的图报错并给出文件名。
 
-   已知限制：位深低于 8 位的灰度 PNG 如果用透明色键表示背景，Pillow 把像素展开成 8 位后色键对不上（在 Pillow 10.4.0 和 12.3.0 上复现过）。这种图会被当成完全不透明的图去抠图，全透明时也不会按第一种情况报错。照片和常见的抠图结果不是这种格式，所以没有专门处理。
+   PNG 的透明色键按文件原始的位深解释。Pillow 读 1、2、4 位的灰度 PNG 和 16 位的灰度、RGB PNG 时会改变像素的位深，却不跟着换算色键（在 Pillow 10.4.0 和 12.3.0 上复现过），直接用它的结果会漏掉透明的像素。所以脚本从文件里读出色键，换算到和像素一致之后再做上面的判断，保留下来的前景用的也是这份换算后的结果。无损压缩工具会把普通的抠图结果存成这类文件。16 位的图只剩高 8 位可以比较，和色键只差低 8 位的像素也会被当成透明。
 2. 加载几何模型，用 `torch.manual_seed(seed)` 生成一个网格，写 `shape.glb`。网格为空时报错。之后释放几何模型和显存，再加载贴图模型。
 3. 贴图（`max_num_view=6`、`resolution=512`，和 `demo.py` 一样），全部输入图都作为参考图。上游的贴图管线会先把 `shape.glb` 重新网格化成 `white_mesh_remesh.obj`，然后写 `textured.obj`、`textured.mtl`、`textured.jpg`（albedo）、`textured_metallic.jpg`、`textured_roughness.jpg`。
 4. 用上游的 `create_glb_with_pbr_materials` 打包成 `model.glb`（base color 加 metallic-roughness 贴图），打包后检查每个图元都带这两张贴图，否则报错。打包用的临时文件在输出目录下的临时子目录里，结束后自动删除。

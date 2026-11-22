@@ -15,6 +15,7 @@ import argparse
 import contextlib
 import gc
 import os
+import struct
 import sys
 import tempfile
 import time
@@ -33,6 +34,7 @@ from PIL import Image  # noqa: E402
 MODEL_PATH = "tencent/Hunyuan3D-2.1"
 REALESRGAN_CKPT = REPO_ROOT / "hy3dpaint" / "ckpt" / "RealESRGAN_x4plus.pth"
 MAX_SEED = 2**32 - 1  # The texture stage seeds NumPy, which accepts 0 .. 2**32 - 1.
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 SHAPE_OUTPUTS = ("shape.glb",)
 # Files written by Hunyuan3DPaintPipeline (remesh, OBJ with maps) and by the GLB packing step.
@@ -86,6 +88,67 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     return args
 
 
+def _png_colour_key(path: str) -> Optional[Tuple[int, int, Tuple[int, ...]]]:
+    """``(bit_depth, colour_type, key)`` of the tRNS colour key in a PNG file, or ``None`` if it has none.
+
+    Only grayscale (colour type 0, one sample) and truecolour (colour type 2, three samples) PNGs have a colour
+    key. A palette tRNS chunk holds one alpha value per palette entry instead, and Pillow reads that correctly.
+    The file has already been decoded by Pillow, so its chunk structure is valid.
+    """
+    with open(path, "rb") as stream:
+        if stream.read(8) != _PNG_SIGNATURE:
+            return None
+        bit_depth = colour_type = -1
+        while True:
+            head = stream.read(8)
+            if len(head) < 8:
+                return None
+            length, kind = struct.unpack(">I4s", head)
+            if kind == b"IHDR":
+                header = stream.read(length)  # width and height (8 bytes), then bit depth and colour type
+                bit_depth, colour_type = header[8], header[9]
+            elif kind == b"tRNS":
+                data = stream.read(length)
+                if colour_type == 0 and length == 2:
+                    return bit_depth, colour_type, struct.unpack(">H", data)
+                if colour_type == 2 and length == 6:
+                    return bit_depth, colour_type, struct.unpack(">3H", data)
+                return None
+            elif kind in (b"IDAT", b"IEND"):
+                return None  # tRNS has to come before the image data
+            else:
+                stream.seek(length, os.SEEK_CUR)
+            stream.seek(4, os.SEEK_CUR)  # CRC
+
+
+def _apply_png_colour_key(image: Image.Image, path: str) -> Image.Image:
+    """Return ``image`` with a colour key that matches the 8-bit pixels Pillow produced for it.
+
+    Pillow expands 1-, 2- and 4-bit gray pixels to 8 bits and keeps only the high byte of 16-bit RGB samples, but
+    leaves the colour key in the file's bit depth (seen with Pillow 10.4.0 and 12.3.0; only the 1-bit key is scaled
+    by 12.3.0). ``convert("RGBA")`` then misses the transparent pixels. Lossless PNG optimisers write such files
+    from ordinary cut-outs. The key is read from the file, so the result does not depend on how a Pillow version
+    stores it. 8-bit files are already read correctly and are returned unchanged.
+    """
+    found = _png_colour_key(path)
+    if found is None:
+        return image
+    bit_depth, colour_type, key = found
+    if colour_type == 0 and bit_depth < 8 and image.mode in ("1", "L"):
+        image = image.convert("L")
+        image.info["transparency"] = key[0] * 255 // (2**bit_depth - 1)  # same scaling as the pixels
+    elif colour_type == 0 and bit_depth == 16 and image.mode == "I;16":
+        # Pillow clips I;16 pixels to 255 when it converts them, which breaks the colours and the key comparison.
+        # Keep the high byte instead, as Pillow itself does for 16-bit RGB.
+        image = Image.fromarray((np.asarray(image) >> 8).astype(np.uint8))  # (H, W) uint8, mode L
+        image.info["transparency"] = key[0] >> 8
+    elif colour_type == 2 and bit_depth == 16 and image.mode == "RGB":
+        image.info["transparency"] = tuple(sample >> 8 for sample in key)
+    # For 16-bit files the comparison is on high bytes, the only part of the pixels that is left: a pixel that
+    # differs from the key only in its low byte becomes transparent too.
+    return image
+
+
 def _alpha_extrema(image: Image.Image) -> Optional[Tuple[int, int]]:
     """``(min, max)`` of the image's alpha, or ``None`` if it carries no transparency information.
 
@@ -110,6 +173,8 @@ def _load_images(paths: List[str]) -> List[Image.Image]:
         except OSError as exc:
             raise ValueError(f"Could not read image {path}: {exc}") from exc
 
+        # The three-way split below and the RGBA image that is kept both use this corrected colour key.
+        image = _apply_png_colour_key(image, path)
         # Look at the original mode first: demo.py converts to RGBA before checking for RGB, so it never removes the
         # background.
         alpha = _alpha_extrema(image)
