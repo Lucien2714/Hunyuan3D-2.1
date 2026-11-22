@@ -87,8 +87,12 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
 
 def _alpha_extrema(image: Image.Image) -> Optional[Tuple[int, int]]:
-    """``(min, max)`` of the alpha channel, or ``None`` if the image has no alpha channel."""
-    if image.mode not in ("RGBA", "LA", "PA") and not (image.mode == "P" and "transparency" in image.info):
+    """``(min, max)`` of the image's alpha, or ``None`` if it carries no transparency information.
+
+    Transparency is either an alpha channel or a PNG transparency entry in ``image.info``: a palette index for mode
+    ``P``, a colour key for modes ``RGB`` and ``L``. ``convert("RGBA")`` turns all of them into an alpha channel.
+    """
+    if image.mode not in ("RGBA", "LA", "PA") and "transparency" not in image.info:
         return None
     return image.convert("RGBA").getchannel("A").getextrema()
 
